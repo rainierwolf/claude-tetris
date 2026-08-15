@@ -1,0 +1,83 @@
+name: Claude Issue Triage
+
+on:
+  issues:
+    types: [opened, edited]
+
+concurrency:
+  group: claude-issue-triage-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Analizar issue, asignar labels y generar diagnóstico
+        id: claude-triage
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          # Damos permiso a Claude para gestionar labels y comentar en el issue
+          # a través de la CLI de gh (ya autenticada con GH_TOKEN en este runner).
+          claude_args: |
+            --allowedTools "Bash(gh issue view:*),Bash(gh issue edit:*),Bash(gh issue comment:*),Bash(gh label list:*)"
+
+          prompt: |
+            Estás analizando el issue #${{ github.event.issue.number }} del repositorio
+            ${{ github.repository }}, titulado: "${{ github.event.issue.title }}".
+
+            Contexto del proyecto: es un Tetris clásico en JavaScript vanilla (Canvas + CSS,
+            sin dependencias). Toda la lógica del juego vive en `game.js`. Consulta CLAUDE.md
+            en la raíz del repo para entender la arquitectura antes de diagnosticar.
+
+            Sigue estos pasos:
+
+            1. Obtén el cuerpo completo del issue con:
+               `gh issue view ${{ github.event.issue.number }} --json title,body,labels,comments`
+
+            2. Inspecciona el código relevante del repositorio (`game.js`, `index.html`,
+               `style.css`, `README.md`) para entender qué partes del juego están implicadas.
+
+            3. Determina qué labels existentes son apropiadas para este issue. Consulta la
+               lista real con `gh label list` y usa ÚNICAMENTE labels que ya existan en el
+               repo (por ejemplo: bug, enhancement, documentation, question, accessibility,
+               good first issue, help wanted, duplicate, invalid, wontfix). No crees labels
+               nuevas. Aplica las labels pertinentes (sustituyendo las que ya no encajen) con:
+               `gh issue edit ${{ github.event.issue.number }} --add-label "label1,label2"`
+
+            4. Redacta un diagnóstico general en español, en formato de comentario markdown,
+               con esta estructura:
+               - **Resumen**: qué pide o reporta el issue en una o dos frases.
+               - **Causa probable / análisis**: qué archivo(s) y función(es) de `game.js` (u
+                 otros ficheros) están relacionados, y por qué.
+               - **Enfoque sugerido**: pasos concretos para implementar el fix o la feature,
+                 sin escribir el código todavía (esto es solo diagnóstico para guiar el
+                 desarrollo posterior).
+               - **Notas adicionales**: riesgos, dudas o información que falte para poder
+                 empezar (si aplica).
+
+               Empieza siempre el comentario con el marcador oculto `<!-- claude-triage -->`
+               en la primera línea, para poder identificarlo después.
+
+            5. Antes de publicar, comprueba si ya existe un comentario tuyo anterior con ese
+               mismo marcador `<!-- claude-triage -->` (usando el resultado de
+               `gh issue view --json comments` del paso 1). Si existe (por ejemplo porque el
+               issue se ha editado y este workflow se ha vuelto a ejecutar), actualízalo con
+               `gh issue comment ${{ github.event.issue.number }} --edit-last --body-file <archivo>`
+               en vez de crear un comentario nuevo. Si no existe, publícalo con
+               `gh issue comment ${{ github.event.issue.number }} --body-file <archivo>`.
+
+            No modifiques el título ni el cuerpo del issue. No cierres el issue. Limítate a
+            labels y a un único comentario de diagnóstico.
