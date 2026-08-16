@@ -30,6 +30,247 @@ const PIECES = [
 
 const LINE_SCORES = [0, 100, 300, 500, 800];
 
+// ==== POWER-UPS ====
+// Cada POWERUP_LINES_INTERVAL líneas eliminadas, la siguiente pieza generada
+// es un power-up en vez de una pieza normal.
+const POWERUP_LINES_INTERVAL = 10;
+
+const POWERUP_TYPES = [
+  { id: 'bomb', label: 'BOMBA', color: '#ff5252', icon: '💣' },
+  { id: 'lightning', label: 'RAYO', color: '#ffee58', icon: '⚡' },
+  { id: 'dye', label: 'TINTE', color: '#f06292', icon: '🎨' },
+  { id: 'gravity', label: 'GRAVEDAD', color: '#7e57c2', icon: '⬇' },
+  { id: 'freeze', label: 'CONGELAR', color: '#4fc3f7', icon: '❄' },
+];
+
+// Hook para sonido: define window.SFX = { play(id) { ... } } para reproducir
+// un sfx distinto por cada power-up (id = 'bomb' | 'lightning' | 'dye' | 'gravity' | 'freeze').
+function playSfx(id) {
+  if (window.SFX && typeof window.SFX.play === 'function') {
+    window.SFX.play(id);
+  }
+}
+
+function clampInt(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+const PowerUpManager = {
+  linesSinceLast: 0,
+  queuedPowerUp: false,
+  freezeUntil: 0,
+  flashEffect: null,
+
+  reset() {
+    this.linesSinceLast = 0;
+    this.queuedPowerUp = false;
+    this.freezeUntil = 0;
+    this.flashEffect = null;
+  },
+
+  registerLinesCleared(count) {
+    this.linesSinceLast += count;
+  },
+
+  isPowerUpDue() {
+    if (this.linesSinceLast >= POWERUP_LINES_INTERVAL) {
+      this.linesSinceLast -= POWERUP_LINES_INTERVAL;
+      return true;
+    }
+    return false;
+  },
+
+  consumeQueuedPowerUp() {
+    if (this.queuedPowerUp) {
+      this.queuedPowerUp = false;
+      return true;
+    }
+    return false;
+  },
+
+  randomType() {
+    return POWERUP_TYPES[Math.floor(Math.random() * POWERUP_TYPES.length)];
+  },
+
+  createPiece() {
+    const def = this.randomType();
+    const shape = [[1, 1], [1, 1]];
+    return {
+      type: null,
+      isPowerUp: true,
+      powerUp: def,
+      shape,
+      x: Math.floor(COLS / 2) - Math.floor(shape[0].length / 2),
+      y: 0,
+    };
+  },
+
+  // Dispara el efecto asociado a la pieza al hacer lock. No se fusiona con
+  // el tablero como una pieza normal.
+  trigger(piece) {
+    const def = piece.powerUp;
+    const centerRow = clampInt(piece.y + Math.floor(piece.shape.length / 2), 0, ROWS - 1);
+    const centerCol = clampInt(piece.x + Math.floor(piece.shape[0].length / 2), 0, COLS - 1);
+    let cells = [];
+    switch (def.id) {
+      case 'bomb':
+        cells = this.effectBomb(centerRow, centerCol);
+        break;
+      case 'lightning':
+        cells = this.effectLightning(centerRow, centerCol);
+        break;
+      case 'dye':
+        cells = this.effectDye();
+        break;
+      case 'gravity':
+        cells = this.effectGravity();
+        clearLines();
+        break;
+      case 'freeze':
+        this.effectFreeze();
+        break;
+    }
+    this.flash(def, cells);
+    playSfx(def.id);
+  },
+
+  // 1. BOMBA: destruye un área de 3x3 celdas centrada en la pieza.
+  effectBomb(cr, cc) {
+    const cells = [];
+    for (let r = cr - 1; r <= cr + 1; r++) {
+      for (let c = cc - 1; c <= cc + 1; c++) {
+        if (r < 0 || r >= ROWS || c < 0 || c >= COLS) continue;
+        board[r][c] = 0;
+        wildcardBoard[r][c] = false;
+        cells.push([r, c]);
+      }
+    }
+    return cells;
+  },
+
+  // 2. RAYO: limpia por completo la fila y la columna de la pieza (en cruz),
+  // igual que un line clear, sin necesidad de que estén llenas.
+  effectLightning(cr, cc) {
+    const cells = [];
+    for (let r = 0; r < ROWS; r++) {
+      board[r][cc] = 0;
+      wildcardBoard[r][cc] = false;
+      cells.push([r, cc]);
+    }
+    for (let c = 0; c < COLS; c++) cells.push([cr, c]);
+
+    board.splice(cr, 1);
+    board.unshift(new Array(COLS).fill(0));
+    wildcardBoard.splice(cr, 1);
+    wildcardBoard.unshift(new Array(COLS).fill(false));
+
+    lines += 1;
+    score += (LINE_SCORES[1] || 0) * level;
+    level = Math.floor(lines / 10) + 1;
+    dropInterval = Math.max(100, 1000 - (level - 1) * 90);
+    this.registerLinesCleared(1);
+    if (this.isPowerUpDue()) this.queuedPowerUp = true;
+
+    return cells;
+  },
+
+  // 3. TINTE: el color más común del tablero pasa a ser "comodín".
+  effectDye() {
+    const counts = new Array(COLORS.length).fill(0);
+    for (let r = 0; r < ROWS; r++)
+      for (let c = 0; c < COLS; c++)
+        if (board[r][c]) counts[board[r][c]]++;
+
+    let bestColor = 0, bestCount = 0;
+    for (let i = 1; i < counts.length; i++) {
+      if (counts[i] > bestCount) {
+        bestCount = counts[i];
+        bestColor = i;
+      }
+    }
+
+    const cells = [];
+    if (bestColor) {
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          if (board[r][c] === bestColor) {
+            wildcardBoard[r][c] = true;
+            cells.push([r, c]);
+          }
+        }
+      }
+    }
+    return cells;
+  },
+
+  // 4. GRAVEDAD: cada columna cae, compactando huecos sin alterar el orden relativo.
+  effectGravity() {
+    const cells = [];
+    for (let c = 0; c < COLS; c++) {
+      const values = [];
+      const wild = [];
+      for (let r = 0; r < ROWS; r++) {
+        if (board[r][c]) {
+          values.push(board[r][c]);
+          wild.push(wildcardBoard[r][c]);
+        }
+      }
+      const empty = ROWS - values.length;
+      for (let r = 0; r < ROWS; r++) {
+        if (r < empty) {
+          board[r][c] = 0;
+          wildcardBoard[r][c] = false;
+        } else {
+          board[r][c] = values[r - empty];
+          wildcardBoard[r][c] = wild[r - empty];
+          cells.push([r, c]);
+        }
+      }
+    }
+    return cells;
+  },
+
+  // 5. CONGELAR: pausa el gravity tick automático 5s (el jugador sigue controlando la pieza).
+  effectFreeze() {
+    this.freezeUntil = performance.now() + 5000;
+  },
+
+  flash(def, cells) {
+    this.flashEffect = { color: def.color, cells: cells || [], start: performance.now(), duration: 400 };
+  },
+
+  drawFlash(context, size) {
+    if (!this.flashEffect) return;
+    const { color, cells, start, duration } = this.flashEffect;
+    const elapsed = performance.now() - start;
+    if (elapsed >= duration) {
+      this.flashEffect = null;
+      return;
+    }
+    const alpha = 1 - elapsed / duration;
+    context.save();
+    context.globalAlpha = alpha * 0.55;
+    context.fillStyle = color;
+    for (const [r, c] of cells) {
+      if (r < 0 || r >= ROWS || c < 0 || c >= COLS) continue;
+      context.fillRect(c * size, r * size, size, size);
+    }
+    context.restore();
+  },
+
+  drawFreezeBadge(context) {
+    if (performance.now() >= this.freezeUntil) return;
+    const remaining = Math.max(0, (this.freezeUntil - performance.now()) / 1000);
+    context.save();
+    context.font = '16px sans-serif';
+    context.textAlign = 'left';
+    context.textBaseline = 'top';
+    context.fillStyle = '#4fc3f7';
+    context.fillText(`❄ ${remaining.toFixed(1)}s`, 8, 8);
+    context.restore();
+  },
+};
+
 const canvas = document.getElementById('board');
 const ctx = canvas.getContext('2d');
 const nextCanvas = document.getElementById('next-canvas');
@@ -42,14 +283,16 @@ const overlayTitle = document.getElementById('overlay-title');
 const overlayScore = document.getElementById('overlay-score');
 const restartBtn = document.getElementById('restart-btn');
 const themeToggle = document.getElementById('theme-toggle');
+const powerupNextEl = document.getElementById('powerup-next');
 
-let board, current, next, score, lines, level, paused, gameOver, lastTime, dropAccum, dropInterval, animId;
-let gridLineColor, pieceHighlightColor;
+let board, wildcardBoard, current, next, score, lines, level, paused, gameOver, lastTime, dropAccum, dropInterval, animId;
+let gridLineColor, pieceHighlightColor, wildcardGlowColor;
 
 function readThemeColors() {
   const styles = getComputedStyle(document.documentElement);
   gridLineColor = styles.getPropertyValue('--grid-line').trim();
   pieceHighlightColor = styles.getPropertyValue('--piece-highlight').trim();
+  wildcardGlowColor = styles.getPropertyValue('--wildcard-glow').trim();
 }
 
 function applyTheme(theme) {
@@ -63,10 +306,21 @@ function createBoard() {
   return Array.from({ length: ROWS }, () => new Array(COLS).fill(0));
 }
 
+function createWildcardBoard() {
+  return Array.from({ length: ROWS }, () => new Array(COLS).fill(false));
+}
+
 function randomPiece() {
   const type = Math.floor(Math.random() * 8) + 1;
   const shape = PIECES[type].map(row => [...row]);
   return { type, shape, x: Math.floor(COLS / 2) - Math.floor(shape[0].length / 2), y: 0 };
+}
+
+function generateNextPiece() {
+  if (PowerUpManager.consumeQueuedPowerUp()) {
+    return PowerUpManager.createPiece();
+  }
+  return randomPiece();
 }
 
 function collide(shape, ox, oy) {
@@ -116,6 +370,8 @@ function clearLines() {
     if (board[r].every(v => v !== 0)) {
       board.splice(r, 1);
       board.unshift(new Array(COLS).fill(0));
+      wildcardBoard.splice(r, 1);
+      wildcardBoard.unshift(new Array(COLS).fill(false));
       cleared++;
       r++;
     }
@@ -125,6 +381,8 @@ function clearLines() {
     score += (LINE_SCORES[cleared] || 0) * level;
     level = Math.floor(lines / 10) + 1;
     dropInterval = Math.max(100, 1000 - (level - 1) * 90);
+    PowerUpManager.registerLinesCleared(cleared);
+    if (PowerUpManager.isPowerUpDue()) PowerUpManager.queuedPowerUp = true;
     updateHUD();
   }
 }
@@ -153,14 +411,19 @@ function softDrop() {
 }
 
 function lockPiece() {
-  merge();
-  clearLines();
+  if (current.isPowerUp) {
+    PowerUpManager.trigger(current);
+    updateHUD();
+  } else {
+    merge();
+    clearLines();
+  }
   spawn();
 }
 
 function spawn() {
   current = next;
-  next = randomPiece();
+  next = generateNextPiece();
   if (collide(current.shape, current.x, current.y)) {
     endGame();
   }
@@ -171,17 +434,40 @@ function updateHUD() {
   scoreEl.textContent = score.toLocaleString();
   linesEl.textContent = lines;
   levelEl.textContent = level;
+  if (powerupNextEl) {
+    powerupNextEl.textContent = Math.max(0, POWERUP_LINES_INTERVAL - PowerUpManager.linesSinceLast);
+  }
 }
 
-function drawBlock(context, x, y, colorIndex, size, alpha) {
+function drawBlock(context, x, y, colorIndex, size, alpha, options) {
   if (!colorIndex) return;
-  const color = COLORS[colorIndex];
+  const opts = options || {};
+  const color = opts.color || COLORS[colorIndex];
   context.globalAlpha = alpha ?? 1;
   context.fillStyle = color;
   context.fillRect(x * size + 1, y * size + 1, size - 2, size - 2);
   // highlight
   context.fillStyle = pieceHighlightColor;
   context.fillRect(x * size + 1, y * size + 1, size - 2, 4);
+
+  if (opts.wildcard) {
+    context.save();
+    context.shadowColor = wildcardGlowColor;
+    context.shadowBlur = 6;
+    context.strokeStyle = wildcardGlowColor;
+    context.lineWidth = 2;
+    context.strokeRect(x * size + 2, y * size + 2, size - 4, size - 4);
+    context.restore();
+  }
+
+  if (opts.icon) {
+    context.font = `${Math.floor(size * 0.55)}px sans-serif`;
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    context.fillStyle = opts.iconColor || '#111';
+    context.fillText(opts.icon, x * size + size / 2, y * size + size / 2 + 1);
+  }
+
   context.globalAlpha = 1;
 }
 
@@ -209,19 +495,27 @@ function draw() {
   // board
   for (let r = 0; r < ROWS; r++)
     for (let c = 0; c < COLS; c++)
-      drawBlock(ctx, c, r, board[r][c], BLOCK);
+      drawBlock(ctx, c, r, board[r][c], BLOCK, 1, wildcardBoard[r][c] ? { wildcard: true } : undefined);
+
+  const pieceOptions = current.isPowerUp
+    ? { color: current.powerUp.color, icon: current.powerUp.icon, iconColor: '#111' }
+    : undefined;
 
   // ghost
   const gy = ghostY();
   for (let r = 0; r < current.shape.length; r++)
     for (let c = 0; c < current.shape[r].length; c++)
       if (current.shape[r][c])
-        drawBlock(ctx, current.x + c, gy + r, current.shape[r][c], BLOCK, 0.2);
+        drawBlock(ctx, current.x + c, gy + r, current.shape[r][c], BLOCK, 0.2, pieceOptions);
 
   // current piece
   for (let r = 0; r < current.shape.length; r++)
     for (let c = 0; c < current.shape[r].length; c++)
-      drawBlock(ctx, current.x + c, current.y + r, current.shape[r][c], BLOCK);
+      drawBlock(ctx, current.x + c, current.y + r, current.shape[r][c], BLOCK, 1, pieceOptions);
+
+  // feedback visual de power-ups
+  PowerUpManager.drawFlash(ctx, BLOCK);
+  PowerUpManager.drawFreezeBadge(ctx);
 }
 
 function drawNext() {
@@ -230,9 +524,12 @@ function drawNext() {
   const shape = next.shape;
   const offX = Math.floor((4 - shape[0].length) / 2);
   const offY = Math.floor((4 - shape.length) / 2);
+  const options = next.isPowerUp
+    ? { color: next.powerUp.color, icon: next.powerUp.icon, iconColor: '#111' }
+    : undefined;
   for (let r = 0; r < shape.length; r++)
     for (let c = 0; c < shape[r].length; c++)
-      drawBlock(nextCtx, offX + c, offY + r, shape[r][c], NB);
+      drawBlock(nextCtx, offX + c, offY + r, shape[r][c], NB, 1, options);
 }
 
 function endGame() {
@@ -260,13 +557,17 @@ function togglePause() {
 function loop(ts) {
   const dt = ts - lastTime;
   lastTime = ts;
-  dropAccum += dt;
-  if (dropAccum >= dropInterval) {
-    dropAccum = 0;
-    if (!collide(current.shape, current.x, current.y + 1)) {
-      current.y++;
-    } else {
-      lockPiece();
+  // CONGELAR: mientras el freeze esté activo no se acumula el gravity tick,
+  // pero el jugador sigue pudiendo mover/rotar la pieza vía el listener de teclado.
+  if (performance.now() >= PowerUpManager.freezeUntil) {
+    dropAccum += dt;
+    if (dropAccum >= dropInterval) {
+      dropAccum = 0;
+      if (!collide(current.shape, current.x, current.y + 1)) {
+        current.y++;
+      } else {
+        lockPiece();
+      }
     }
   }
   draw();
@@ -276,6 +577,7 @@ function loop(ts) {
 function init() {
   readThemeColors();
   board = createBoard();
+  wildcardBoard = createWildcardBoard();
   score = 0;
   lines = 0;
   level = 1;
@@ -284,7 +586,8 @@ function init() {
   dropInterval = 1000;
   dropAccum = 0;
   lastTime = performance.now();
-  next = randomPiece();
+  PowerUpManager.reset();
+  next = generateNextPiece();
   spawn();
   updateHUD();
   overlay.classList.add('hidden');

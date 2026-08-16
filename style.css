@@ -25,6 +25,7 @@
   --piece-highlight: rgba(255, 255, 255, 0.12);
   --switch-bg: #2a2a3a;
   --switch-knob: #e0e0e0;
+  --wildcard-glow: #ffd700;
 }
 
 [data-theme="light"] {
@@ -48,6 +49,7 @@
   --piece-highlight: rgba(255, 255, 255, 0.45);
   --switch-bg: #c7cadb;
   --switch-knob: #ffffff;
+  --wildcard-glow: #f9a825;
 }
 
 body {
